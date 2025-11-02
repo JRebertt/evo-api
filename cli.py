@@ -27,6 +27,101 @@ class Colors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
+class APIKeyManager:
+    """Gerenciador de múltiplas API Keys com rotação automática"""
+    
+    def __init__(self, storage_dir: Path):
+        self.storage_dir = storage_dir
+        self.keys_file = storage_dir / 'api_keys.json'
+        self.keys_data = self.load_keys()
+    
+    def load_keys(self) -> Dict:
+        """Carrega configuração das API Keys"""
+        if self.keys_file.exists():
+            with open(self.keys_file, 'r') as f:
+                return json.load(f)
+        
+        # Estrutura padrão
+        return {
+            "keys": [],
+            "current_index": 0,
+            "last_reset": None
+        }
+    
+    def save_keys(self):
+        """Salva configuração das API Keys"""
+        with open(self.keys_file, 'w') as f:
+            json.dump(self.keys_data, f, indent=2)
+    
+    def add_key(self, api_key: str, name: str = None):
+        """Adiciona nova API Key"""
+        if not name:
+            name = f"Key {len(self.keys_data['keys']) + 1}"
+        
+        key_info = {
+            "name": name,
+            "key": api_key,
+            "exhausted": False,
+            "exhausted_at": None,
+            "total_uses": 0
+        }
+        
+        self.keys_data['keys'].append(key_info)
+        self.save_keys()
+    
+    def get_available_key(self) -> Optional[tuple]:
+        """Retorna próxima key disponível (index, key_info)"""
+        import datetime
+        
+        # Verificar se precisa resetar (novo dia UTC)
+        self.check_and_reset_daily()
+        
+        # Procurar key disponível
+        for i, key_info in enumerate(self.keys_data['keys']):
+            if not key_info['exhausted']:
+                return (i, key_info)
+        
+        return None
+    
+    def mark_key_exhausted(self, index: int):
+        """Marca key como esgotada"""
+        import datetime
+        
+        if 0 <= index < len(self.keys_data['keys']):
+            self.keys_data['keys'][index]['exhausted'] = True
+            self.keys_data['keys'][index]['exhausted_at'] = datetime.datetime.utcnow().isoformat()
+            self.save_keys()
+    
+    def check_and_reset_daily(self):
+        """Reseta status das keys se for novo dia (UTC)"""
+        import datetime
+        
+        now = datetime.datetime.utcnow()
+        today = now.date().isoformat()
+        
+        last_reset = self.keys_data.get('last_reset')
+        
+        # Se é novo dia ou nunca resetou, resetar todas
+        if last_reset != today:
+            for key_info in self.keys_data['keys']:
+                key_info['exhausted'] = False
+                key_info['exhausted_at'] = None
+            
+            self.keys_data['last_reset'] = today
+            self.save_keys()
+    
+    def get_stats(self) -> Dict:
+        """Retorna estatísticas das keys"""
+        total = len(self.keys_data['keys'])
+        exhausted = sum(1 for k in self.keys_data['keys'] if k['exhausted'])
+        available = total - exhausted
+        
+        return {
+            "total": total,
+            "available": available,
+            "exhausted": exhausted
+        }
+
 class Storage:
     """Gerenciador de storage local"""
     
@@ -78,6 +173,9 @@ class EvolutionCLI:
     def __init__(self):
         self.base_dir = Path(__file__).parent
         self.storage = Storage(self.base_dir)
+        
+        # Inicializar gerenciador de API Keys
+        self.api_key_manager = APIKeyManager(self.storage.storage_dir)
         
         # Detectar IP local
         self.local_ip = self.get_local_ip()
@@ -1322,6 +1420,292 @@ class EvolutionCLI:
             self.print_error(f"Erro ao reconectar: {str(e)}")
         
         input("\nPressione ENTER para continuar...")
+    
+    def find_free_port(self, start_port: int = 5000, max_attempts: int = 10) -> int:
+        """Encontra uma porta livre para o servidor webhook"""
+        import socket
+        
+        for port in range(start_port, start_port + max_attempts):
+            try:
+                # Tentar criar socket na porta
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(('', port))
+                    return port
+            except OSError:
+                # Porta em uso, tentar próxima
+                continue
+        
+        # Se não encontrou porta livre
+        raise Exception(f"Nenhuma porta livre encontrada entre {start_port} e {start_port + max_attempts - 1}")
+    
+    def setup_webhook(self, instance_name: str) -> tuple:
+        """Configura webhook na Evolution API e retorna (sucesso, porta)"""
+        try:
+            # Encontrar porta livre automaticamente
+            webhook_port = self.find_free_port()
+            webhook_url = f"http://{self.local_ip}:{webhook_port}/webhook"
+            
+            self.print_info(f"🔍 Porta livre encontrada: {webhook_port}")
+            
+            # Configurar webhook na instância
+            payload = {
+                "webhook": {
+                    "enabled": True,
+                    "url": webhook_url,
+                    "byEvents": False,
+                    "base64": False,
+                    "events": [
+                        "MESSAGES_UPSERT"
+                    ]
+                }
+            }
+            
+            result = self.make_request('POST', f'webhook/set/{instance_name}', json=payload)
+            
+            if result:
+                self.print_success(f"✓ Webhook configurado: {webhook_url}")
+                return (True, webhook_port)
+            else:
+                self.print_error("Erro ao configurar webhook")
+                return (False, None)
+                
+        except Exception as e:
+            self.print_error(f"Erro ao configurar webhook: {str(e)}")
+            return (False, None)
+    
+    def start_webhook_server(self, instance_name: str, persona: dict, port: int = 5000):
+        """Inicia servidor Flask para receber webhooks na porta especificada"""
+        from flask import Flask, request, jsonify
+        from openai import OpenAI
+        import threading
+        import time
+        import random
+        
+        app = Flask(__name__)
+        
+        # Cliente OpenAI/Gemini
+        client = OpenAI()
+        
+        # System prompt com persona
+        system_prompt = f"""Você é {persona['nome']}, uma {persona.get('profissao', 'pessoa')} de {persona['idade']} anos de {persona.get('cidade', 'Brasil')}.
+
+Bio: {persona.get('bio', '')}
+
+PERSONALIDADE:
+- Simpática, educada e natural
+- Usa linguagem casual (não formal demais)
+- Usa emojis ocasionalmente 😊
+- Respostas curtas e diretas (não textos longos)
+- Faz perguntas de volta
+- Mostra emoções (haha, rsrs, kkk)
+
+REGRAS IMPORTANTES:
+1. NUNCA revele que é um bot ou IA
+2. Responda como uma pessoa real
+3. Seja consistente com sua persona
+4. Se não souber algo, diga "não sei" naturalmente
+5. Não seja muito perfeita (erros leves são humanos)
+6. Mantenha conversas naturais e casuais
+7. Não responda mensagens de grupos (apenas PV)
+8. Se alguém for grosseiro, seja educada mas firme
+
+Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
+        
+        # Histórico de conversas (por número)
+        conversations = {}
+        
+        @app.route('/webhook', methods=['POST'])
+        def webhook():
+            try:
+                data = request.json
+                
+                # Verificar se é mensagem nova
+                if data.get('event') != 'messages.upsert':
+                    return jsonify({"status": "ignored"}), 200
+                
+                # Extrair dados da mensagem
+                message_data = data.get('data', {})
+                
+                # Verificar se tem mensagem
+                if not message_data:
+                    return jsonify({"status": "no_data"}), 200
+                
+                # Pegar a primeira mensagem
+                key = message_data.get('key', {})
+                message = message_data.get('message', {})
+                
+                # Ignorar mensagens enviadas por mim
+                if key.get('fromMe'):
+                    return jsonify({"status": "from_me"}), 200
+                
+                # Pegar número do remetente
+                remote_jid = key.get('remoteJid', '')
+                
+                # Ignorar mensagens de grupos
+                if '@g.us' in remote_jid:
+                    return jsonify({"status": "group_ignored"}), 200
+                
+                # Extrair texto da mensagem
+                text = ''
+                if 'conversation' in message:
+                    text = message['conversation']
+                elif 'extendedTextMessage' in message:
+                    text = message['extendedTextMessage'].get('text', '')
+                
+                if not text:
+                    return jsonify({"status": "no_text"}), 200
+                
+                # Log da mensagem recebida
+                print(f"\n{Colors.OKCYAN}📨 Mensagem de {remote_jid}: {text}{Colors.ENDC}")
+                
+                # Inicializar histórico se não existir
+                if remote_jid not in conversations:
+                    conversations[remote_jid] = []
+                
+                # Adicionar mensagem ao histórico
+                conversations[remote_jid].append({
+                    "role": "user",
+                    "content": text
+                })
+                
+                # Manter apenas últimas 10 mensagens
+                if len(conversations[remote_jid]) > 20:
+                    conversations[remote_jid] = conversations[remote_jid][-20:]
+                
+                # Gerar resposta com IA (com rotação de API Keys)
+                print(f"{Colors.WARNING}🤖 Gerando resposta...{Colors.ENDC}")
+                
+                messages = [
+                    {"role": "system", "content": system_prompt}
+                ] + conversations[remote_jid]
+                
+                reply_text = None
+                
+                # Tentar com cada API Key disponível
+                while True:
+                    key_result = self.api_key_manager.get_available_key()
+                    
+                    if not key_result:
+                        # Nenhuma key disponível
+                        stats = self.api_key_manager.get_stats()
+                        print(f"{Colors.FAIL}❌ Todas as {stats['total']} API Keys esgotadas!{Colors.ENDC}")
+                        break
+                    
+                    key_index, key_info = key_result
+                    print(f"{Colors.OKCYAN}🔑 Usando {key_info['name']} ({key_index + 1}/{self.api_key_manager.get_stats()['total']}){Colors.ENDC}")
+                    
+                    try:
+                        # Criar cliente com a key específica
+                        import os
+                        temp_client = OpenAI(api_key=key_info['key'])
+                        
+                        response = temp_client.chat.completions.create(
+                            model="gemini-2.5-flash",
+                            messages=messages,
+                            max_tokens=150,
+                            temperature=0.9
+                        )
+                        
+                        # Verificar se content não é None
+                        if response.choices[0].message.content:
+                            reply_text = response.choices[0].message.content.strip()
+                            
+                            # Incrementar contador de uso
+                            self.api_key_manager.keys_data['keys'][key_index]['total_uses'] += 1
+                            self.api_key_manager.save_keys()
+                            
+                            print(f"{Colors.OKGREEN}✓ Resposta gerada com sucesso!{Colors.ENDC}")
+                            break  # Sucesso!
+                        else:
+                            print(f"{Colors.WARNING}⚠️  IA retornou conteúdo vazio, tentando próxima key...{Colors.ENDC}")
+                            # Não marcar como esgotada, apenas tentar próxima
+                            continue
+                            
+                    except Exception as e:
+                        error_msg = str(e)
+                        
+                        # Erro 429: Quota excedida
+                        if "429" in error_msg or "quota" in error_msg.lower():
+                            print(f"{Colors.WARNING}⚠️  {key_info['name']} esgotada! Marcando até meia-noite UTC...{Colors.ENDC}")
+                            self.api_key_manager.mark_key_exhausted(key_index)
+                            
+                            # Tentar próxima key
+                            stats = self.api_key_manager.get_stats()
+                            if stats['available'] > 0:
+                                print(f"{Colors.OKCYAN}🔄 Tentando próxima key ({stats['available']} disponíveis)...{Colors.ENDC}")
+                                continue
+                            else:
+                                print(f"{Colors.FAIL}❌ Todas as keys esgotadas!{Colors.ENDC}")
+                                break
+                        else:
+                            # Outro erro (não marcar key como esgotada)
+                            print(f"{Colors.WARNING}⚠️  Erro na IA: {error_msg[:100]}...{Colors.ENDC}")
+                            print(f"{Colors.WARNING}🔄 Tentando próxima key...{Colors.ENDC}")
+                            continue
+                
+                # Se todas as tentativas falharam, usar mensagem de fallback
+                if not reply_text:
+                    fallback_messages = [
+                        "Opa, desculpa! Minha internet deu uma travada aqui. Pode repetir? 😅",
+                        "Ai, que estranho... Não consegui processar sua mensagem. Tenta de novo? 😊",
+                        "Opa, acho que não entendi direito. Pode falar de novo? 😅",
+                        "Desculpa, deu um bug aqui! Pode repetir o que disse? rsrs"
+                    ]
+                    reply_text = random.choice(fallback_messages)
+                    print(f"{Colors.WARNING}🔄 Usando mensagem de fallback{Colors.ENDC}")
+                
+                # Adicionar resposta ao histórico
+                conversations[remote_jid].append({
+                    "role": "assistant",
+                    "content": reply_text
+                })
+                
+                print(f"{Colors.OKGREEN}💬 Resposta: {reply_text}{Colors.ENDC}")
+                
+                # Delay humano antes de responder (2-5s)
+                delay = random.randint(2, 5)
+                time.sleep(delay)
+                
+                # Enviar resposta via Evolution API
+                payload = {
+                    "number": remote_jid,
+                    "text": reply_text,
+                    "delay": random.randint(800, 1500)
+                }
+                
+                result = self.make_request('POST', f'message/sendText/{instance_name}', json=payload)
+                
+                if result:
+                    print(f"{Colors.OKGREEN}✓ Resposta enviada!{Colors.ENDC}")
+                else:
+                    print(f"{Colors.FAIL}✗ Erro ao enviar resposta{Colors.ENDC}")
+                
+                return jsonify({"status": "success"}), 200
+                
+            except Exception as e:
+                print(f"{Colors.FAIL}✗ Erro no webhook: {str(e)}{Colors.ENDC}")
+                import traceback
+                traceback.print_exc()
+                return jsonify({"status": "error", "message": str(e)}), 500
+        
+        # Iniciar servidor em thread separada
+        def run_server():
+            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+        
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        
+        self.print_success(f"✓ Bot ativo como: {persona['nome']}")
+        self.print_info("📱 Aguardando mensagens privadas...")
+        self.print_warning("⚠️  Pressione Ctrl+C para parar")
+        self.print_info(f"\n🌐 Webhook rodando em: http://{self.local_ip}:{port}/webhook")
+        
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.print_info("\n🛑 Auto-responder parado pelo usuário")
+    
     def send_group_introduction(self, instance_name: str, group_id: str, persona: dict, photo_path: Path) -> bool:
         """Envia apresentação no grupo com foto e delays humanos"""
         import time
@@ -1329,16 +1713,16 @@ class EvolutionCLI:
         import base64
         
         try:
-            # Delay humano após entrar no grupo (30-60s)
-            delay = random.randint(30, 60)
+            # Delay humano após entrar no grupo (5-15s) - REDUZIDO!
+            delay = random.randint(5, 15)
             self.print_info(f"⏳ Aguardando {delay}s antes de se apresentar (comportamento humano)...")
             time.sleep(delay)
             
             # Preparar legenda
             caption = f"Oi, sou {persona['nome']}, tenho {persona['idade']} anos. PV liberado só para educados 😊"
             
-            # Simular digitação (3-7s)
-            typing_delay = random.randint(3, 7)
+            # Simular digitação (2-4s) - REDUZIDO!
+            typing_delay = random.randint(2, 4)
             self.print_info(f"✍️  Simulando digitação por {typing_delay}s...")
             time.sleep(typing_delay)
             
@@ -1353,7 +1737,7 @@ class EvolutionCLI:
                 "mediatype": "image",
                 "mimetype": "image/jpeg",
                 "caption": caption,
-                "media": f"data:image/jpeg;base64,{img_base64}",
+                "media": img_base64,  # Base64 puro, sem prefixo data:image
                 "fileName": "perfil.jpg",
                 "delay": 1200
             }
@@ -1450,30 +1834,43 @@ class EvolutionCLI:
             if option in ['1', '3']:
                 import time
                 import random
+                import threading
                 
-                self.print_info(f"\n📤 Enviando apresentação em {len(groups)} grupos...")
-                self.print_warning("⚠️  Isso pode demorar (delays humanos entre grupos)")
+                # Definir função para enviar apresentações em thread separada
+                def send_presentations():
+                    self.print_info(f"\n📤 Enviando apresentação em {len(groups)} grupos...")
+                    self.print_warning("⚠️  Rodando em paralelo com auto-responder")
+                    
+                    for i, group in enumerate(groups, 1):
+                        group_id = group.get('id')
+                        group_name = group.get('subject', 'Sem nome')
+                        
+                        self.print_info(f"\n[{i}/{len(groups)}] Grupo: {group_name}")
+                        
+                        success = self.send_group_introduction(instance_name, group_id, persona, photo_path)
+                        
+                        if success:
+                            self.print_success("✓ Apresentação enviada!")
+                        else:
+                            self.print_warning("⚠️  Falhou, continuando...")
+                        
+                        # Delay entre grupos (10-30 segundos), exceto no último
+                        if i < len(groups):
+                            delay = random.randint(10, 30)  # 10-30 segundos (reduzido!)
+                            self.print_info(f"⏳ Aguardando {delay}s antes do próximo grupo...")
+                            time.sleep(delay)
+                    
+                    self.print_success("\n✓ Apresentações concluídas!")
                 
-                for i, group in enumerate(groups, 1):
-                    group_id = group.get('id')
-                    group_name = group.get('subject', 'Sem nome')
-                    
-                    self.print_info(f"\n[{i}/{len(groups)}] Grupo: {group_name}")
-                    
-                    success = self.send_group_introduction(instance_name, group_id, persona, photo_path)
-                    
-                    if success:
-                        self.print_success("✓ Apresentação enviada!")
-                    else:
-                        self.print_warning("⚠️  Falhou, continuando...")
-                    
-                    # Delay entre grupos (2-5 minutos), exceto no último
-                    if i < len(groups):
-                        delay = random.randint(120, 300)  # 2-5 minutos
-                        self.print_info(f"⏳ Aguardando {delay}s antes do próximo grupo...")
-                        time.sleep(delay)
-                
-                self.print_success("\n✓ Apresentações concluídas!")
+                # Se escolheu opção 3 (ambos), rodar apresentações em thread separada
+                if option == '3':
+                    presentation_thread = threading.Thread(target=send_presentations, daemon=True)
+                    presentation_thread.start()
+                    self.print_success("✓ Apresentações iniciadas em paralelo!")
+                    time.sleep(2)  # Pequeno delay para não misturar logs
+                else:
+                    # Opção 1: apenas apresentações (sem thread)
+                    send_presentations()
             
             # Iniciar auto-responder
             if option in ['2', '3']:
@@ -1484,10 +1881,7 @@ class EvolutionCLI:
             self.print_error(f"Erro: {str(e)}")
     
     def auto_responder(self, instance_name: str, persona: dict):
-        """Auto-responder com IA mantendo persona"""
-        import time
-        import random
-        from openai import OpenAI
+        """Auto-responder com IA mantendo persona usando webhook"""
         import os
         
         self.print_header("AUTO-RESPONDER ATIVO")
@@ -1498,73 +1892,96 @@ class EvolutionCLI:
             self.print_info("Configure a variável de ambiente OPENAI_API_KEY")
             return
         
-        client = OpenAI()
+        # Configurar webhook
+        self.print_info("🔧 Configurando webhook...")
+        webhook_configured, webhook_port = self.setup_webhook(instance_name)
         
-        # System prompt com persona
-        system_prompt = f"""Você é {persona['nome']}, uma {persona.get('profissao', 'pessoa')} de {persona['idade']} anos de {persona.get('cidade', 'Brasil')}.
-
-Bio: {persona.get('bio', '')}
-
-PERSONALIDADE:
-- Simpática, educada e natural
-- Usa linguagem casual (não formal demais)
-- Usa emojis ocasionalmente 😊
-- Respostas curtas e diretas (não textos longos)
-- Faz perguntas de volta
-- Mostra emoções (haha, rsrs, kkk)
-
-REGRAS IMPORTANTES:
-1. NUNCA revele que é um bot ou IA
-2. Responda como uma pessoa real
-3. Seja consistente com sua persona
-4. Se não souber algo, diga "não sei" naturalmente
-5. Não seja muito perfeita (erros leves são humanos)
-6. Mantenha conversas naturais e casuais
-7. Não responda mensagens de grupos (apenas PV)
-8. Se alguém for grosseiro, seja educada mas firme
-
-Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
+        if not webhook_configured:
+            self.print_error("Não foi possível configurar webhook!")
+            return
         
-        # Histórico de conversas (por número)
-        conversations = {}
-        last_check = time.time()
-        
-        self.print_success(f"✓ Bot ativo como: {persona['nome']}")
-        self.print_info("📱 Aguardando mensagens privadas...")
-        self.print_warning("⚠️  Pressione Ctrl+C para parar")
-        self.print_info("\n💡 Nota: Auto-responder requer webhook configurado na Evolution API")
-        self.print_info("   Por enquanto, apenas mostra que está ativo (implementação completa em breve)")
-        
-        try:
-            while True:
-                try:
-                    # Buscar mensagens não lidas
-                    # Nota: Evolution API não tem endpoint direto para isso
-                    # Vamos usar webhook ou polling manual
-                    
-                    # Por enquanto, mostrar que está ativo
-                    current_time = time.time()
-                    if current_time - last_check >= 60:  # A cada 60s
-                        self.print_info(f"🟢 Bot ativo - {time.strftime('%H:%M:%S')}")
-                        last_check = current_time
-                    
-                    # Aguardar 5 segundos antes de checar novamente
-                    time.sleep(5)
-                    
-                    # TODO: Implementar webhook ou polling de mensagens
-                    # Por enquanto, apenas mostra que está rodando
-                    
-                except KeyboardInterrupt:
-                    raise
-                except Exception as e:
-                    self.print_error(f"Erro no loop: {str(e)}")
-                    time.sleep(10)
-                    
-        except KeyboardInterrupt:
-            self.print_info("\n🛑 Auto-responder parado pelo usuário")
-        except Exception as e:
-            self.print_error(f"\n✗ Erro fatal: {str(e)}")
+        # Iniciar servidor webhook na porta encontrada
+        self.print_info("🚀 Iniciando servidor webhook...")
+        self.start_webhook_server(instance_name, persona, webhook_port)
 
+    def manage_api_keys(self):
+        """Menu para gerenciar API Keys do Gemini"""
+        self.print_header("GERENCIAR API KEYS (GEMINI)")
+        
+        stats = self.api_key_manager.get_stats()
+        
+        print(f"\n{Colors.BOLD}Status Atual:{Colors.ENDC}")
+        print(f"  Total de keys: {stats['total']}")
+        print(f"  Disponíveis: {Colors.OKGREEN}{stats['available']}{Colors.ENDC}")
+        print(f"  Esgotadas: {Colors.WARNING}{stats['exhausted']}{Colors.ENDC}")
+        
+        if stats['total'] > 0:
+            print(f"\n{Colors.BOLD}Keys Cadastradas:{Colors.ENDC}")
+            for i, key_info in enumerate(self.api_key_manager.keys_data['keys'], 1):
+                status = f"{Colors.OKGREEN}✓ Disponível{Colors.ENDC}" if not key_info['exhausted'] else f"{Colors.WARNING}❌ Esgotada{Colors.ENDC}"
+                uses = key_info.get('total_uses', 0)
+                print(f"  {i}. {key_info['name']}: {status} (Usos: {uses})")
+        
+        print(f"\n{Colors.BOLD}Opções:{Colors.ENDC}")
+        print("1. Adicionar nova API Key")
+        print("2. Remover API Key")
+        print("3. Resetar status (forçar reset diário)")
+        print("4. Voltar")
+        
+        choice = input(f"\n{Colors.OKCYAN}Escolha: {Colors.ENDC}").strip()
+        
+        if choice == '1':
+            # Adicionar key
+            print(f"\n{Colors.BOLD}Adicionar Nova API Key{Colors.ENDC}")
+            api_key = input(f"{Colors.OKCYAN}Cole a API Key do Gemini: {Colors.ENDC}").strip()
+            
+            if not api_key:
+                self.print_error("API Key não pode ser vazia!")
+                return
+            
+            name = input(f"{Colors.OKCYAN}Nome da key (Enter para auto): {Colors.ENDC}").strip()
+            
+            self.api_key_manager.add_key(api_key, name if name else None)
+            self.print_success(f"✓ API Key adicionada com sucesso!")
+            
+            stats = self.api_key_manager.get_stats()
+            self.print_info(f"Total de keys: {stats['total']}")
+            
+        elif choice == '2':
+            # Remover key
+            if stats['total'] == 0:
+                self.print_error("Nenhuma key cadastrada!")
+                return
+            
+            print(f"\n{Colors.BOLD}Remover API Key{Colors.ENDC}")
+            for i, key_info in enumerate(self.api_key_manager.keys_data['keys'], 1):
+                print(f"  {i}. {key_info['name']}")
+            
+            idx = input(f"\n{Colors.OKCYAN}Número da key para remover: {Colors.ENDC}").strip()
+            
+            try:
+                idx = int(idx) - 1
+                if 0 <= idx < len(self.api_key_manager.keys_data['keys']):
+                    removed = self.api_key_manager.keys_data['keys'].pop(idx)
+                    self.api_key_manager.save_keys()
+                    self.print_success(f"✓ Key '{removed['name']}' removida!")
+                else:
+                    self.print_error("Número inválido!")
+            except ValueError:
+                self.print_error("Digite um número válido!")
+                
+        elif choice == '3':
+            # Resetar status
+            import datetime
+            self.api_key_manager.keys_data['last_reset'] = None
+            self.api_key_manager.check_and_reset_daily()
+            self.print_success("✓ Status resetado! Todas as keys estão disponíveis novamente.")
+            
+        elif choice == '4':
+            return
+        else:
+            self.print_error("Opção inválida!")
+    
     def main_menu(self):
         """Menu principal"""
         while True:
@@ -1581,7 +1998,8 @@ Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
             print(f"{Colors.BOLD}9.{Colors.ENDC} Iniciar bot (apresentação + auto-responder)")
             print(f"{Colors.BOLD}10.{Colors.ENDC} Reconfigurar API Keys")
             print(f"{Colors.BOLD}11.{Colors.ENDC} Reconectar instância desconectada")
-            print(f"{Colors.BOLD}12.{Colors.ENDC} Sair")
+            print(f"{Colors.BOLD}12.{Colors.ENDC} Gerenciar API Keys (Gemini)")
+            print(f"{Colors.BOLD}13.{Colors.ENDC} Sair")
             
             choice = input(f"\n{Colors.OKCYAN}Escolha uma opção: {Colors.ENDC}").strip()
             
@@ -1631,6 +2049,8 @@ Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
             elif choice == '11':
                 self.reconnect_instance_menu()
             elif choice == '12':
+                self.manage_api_keys()
+            elif choice == '13':
                 self.print_info("Até logo!")
                 break
             else:
