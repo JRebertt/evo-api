@@ -49,6 +49,7 @@ services:
       - DATABASE_CONNECTION_TYPE=postgres
       - DATABASE_PROVIDER=postgresql
       - DATABASE_CONNECTION_URI=postgres://evolution:evolution_pass_2024@postgres:5432/evolution_db
+      - DATABASE_CONNECTION_CLIENT_NAME=evolution_exchange  # ADICIONAR ESTA!
       - DATABASE_SSL_CERT=false
       - DATABASE_SAVE_DATA_INSTANCE=true
       - DATABASE_SAVE_DATA_NEW_MESSAGE=true

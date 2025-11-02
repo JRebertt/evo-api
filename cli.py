@@ -723,8 +723,8 @@ class EvolutionCLI:
                 return True
             
             if attempt < 2:
-                self.print_warning(f"Tentativa {attempt + 1} falhou, aguardando 3s...")
-                time.sleep(3)
+                self.print_warning(f"Tentativa {attempt + 1} falhou, aguardando 8s...")
+                time.sleep(8)
         
         self.print_error("✗ Não foi possível atualizar o nome após 3 tentativas")
         self.print_warning("📝 Configure o nome MANUALMENTE no WhatsApp")
@@ -751,8 +751,8 @@ class EvolutionCLI:
                 return True
             
             if attempt < 2:
-                self.print_warning(f"Tentativa {attempt + 1} falhou, aguardando 2s...")
-                time.sleep(2)
+                self.print_warning(f"Tentativa {attempt + 1} falhou, aguardando 5s...")
+                time.sleep(5)
         
         self.print_error("Não foi possível atualizar a bio após 3 tentativas")
         return False
@@ -819,13 +819,17 @@ class EvolutionCLI:
         
         # Atualizar foto
         success &= self.update_profile_picture(instance_name, photo_path)
-        self.print_info("Aguardando 5s para estabilizar...")
-        time.sleep(5)  # Aguardar 5s para WhatsApp processar
+        self.print_info("Aguardando 25s para estabilizar (comportamento humano)...")
+        time.sleep(25)  # Delay humano: 25s (aumentado de 15s)
         
         # Atualizar nome
         success &= self.update_profile_name(instance_name, persona['nome'])
-        self.print_info("Aguardando 5s para estabilizar...")
-        time.sleep(5)  # Aguardar 5s para WhatsApp processar
+        self.print_info("Aguardando 35s para estabilizar (comportamento humano)...")
+        time.sleep(35)  # Delay humano: 35s (aumentado de 20s)
+        
+        # Delay adicional antes da bio
+        self.print_info("Aguardando 15s antes de atualizar bio (comportamento humano)...")
+        time.sleep(15)  # Delay adicional: 15s
         
         # Atualizar bio
         success &= self.update_profile_status(instance_name, persona['bio'])
@@ -1002,9 +1006,19 @@ class EvolutionCLI:
         for i, name in enumerate(connected.keys(), 1):
             print(f"  {i}. 🟢 {name}")
         
-        instance_name = input(f"\n{Colors.OKCYAN}Nome da instância: {Colors.ENDC}").strip()
+        choice = input(f"\n{Colors.OKCYAN}Escolha (número ou nome): {Colors.ENDC}").strip()
         
-        if instance_name not in connected:
+        # Aceitar número ou nome
+        instance_name = None
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(connected):
+                instance_name = list(connected.keys())[idx]
+        else:
+            if choice in connected:
+                instance_name = choice
+        
+        if not instance_name:
             self.print_error("Instância não encontrada ou não está conectada!")
             return
         
@@ -1120,9 +1134,19 @@ class EvolutionCLI:
         for i, name in enumerate(connected.keys(), 1):
             print(f"  {i}. {name}")
         
-        instance_name = input(f"\n{Colors.OKCYAN}Nome da instância: {Colors.ENDC}").strip()
+        choice = input(f"\n{Colors.OKCYAN}Escolha (número ou nome): {Colors.ENDC}").strip()
         
-        if instance_name not in connected:
+        # Aceitar número ou nome
+        instance_name = None
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(connected):
+                instance_name = list(connected.keys())[idx]
+        else:
+            if choice in connected:
+                instance_name = choice
+        
+        if not instance_name:
             self.print_error("Instância não encontrada ou não está conectada!")
             return
         
@@ -1225,6 +1249,322 @@ class EvolutionCLI:
         except Exception as e:
             self.print_error(f"Erro durante scraping: {str(e)}")
     
+    def reconnect_instance_menu(self):
+        """Menu para reconectar instância desconectada"""
+        self.print_header("RECONECTAR INSTÂNCIA")
+        
+        # Listar instâncias
+        instances = self.make_request('GET', 'instance/fetchInstances')
+        
+        if not instances:
+            self.print_error("Nenhuma instância encontrada!")
+            input("\nPressione ENTER para continuar...")
+            return
+        
+        # Mostrar instâncias
+        print(f"\n{Colors.BOLD}Instâncias disponíveis:{Colors.ENDC}\n")
+        for i, inst in enumerate(instances, 1):
+            name = inst.get('instance', {}).get('instanceName', 'Sem nome')
+            state = inst.get('instance', {}).get('state', 'unknown')
+            
+            # Colorir status
+            if state == 'open':
+                status_color = Colors.OKGREEN
+                status_text = "✓ Conectada"
+            elif state == 'close':
+                status_color = Colors.FAIL
+                status_text = "✗ Desconectada"
+            else:
+                status_color = Colors.WARNING
+                status_text = f"⚠ {state}"
+            
+            print(f"{Colors.BOLD}{i}.{Colors.ENDC} {name} - {status_color}{status_text}{Colors.ENDC}")
+        
+        # Escolher instância
+        choice = input(f"\n{Colors.OKCYAN}Escolha a instância (número): {Colors.ENDC}").strip()
+        
+        try:
+            index = int(choice) - 1
+            if index < 0 or index >= len(instances):
+                self.print_error("Opção inválida!")
+                input("\nPressione ENTER para continuar...")
+                return
+            
+            instance_name = instances[index].get('instance', {}).get('instanceName')
+            current_state = instances[index].get('instance', {}).get('state')
+            
+            # Verificar se já está conectada
+            if current_state == 'open':
+                self.print_warning(f"Instância '{instance_name}' já está conectada!")
+                reconnect = input(f"\n{Colors.OKCYAN}Deseja reconectar mesmo assim? (s/N): {Colors.ENDC}").strip().lower()
+                if reconnect != 's':
+                    return
+            
+            # Reconectar
+            self.print_info(f"\nReconectando instância: {instance_name}")
+            
+            result = self.connect_instance(instance_name)
+            
+            if result:
+                # Aguardar conexão
+                self.print_info("\n⏳ Aguardando conexão...")
+                
+                if self.wait_for_connection(instance_name, timeout=120):
+                    self.print_success(f"\n✓ Instância '{instance_name}' reconectada com sucesso!")
+                else:
+                    self.print_error(f"\n✗ Timeout ao aguardar conexão de '{instance_name}'")
+            else:
+                self.print_error(f"\n✗ Não foi possível reconectar '{instance_name}'")
+        
+        except ValueError:
+            self.print_error("Digite um número válido!")
+        except Exception as e:
+            self.print_error(f"Erro ao reconectar: {str(e)}")
+        
+        input("\nPressione ENTER para continuar...")
+    def send_group_introduction(self, instance_name: str, group_id: str, persona: dict, photo_path: Path) -> bool:
+        """Envia apresentação no grupo com foto e delays humanos"""
+        import time
+        import random
+        import base64
+        
+        try:
+            # Delay humano após entrar no grupo (30-60s)
+            delay = random.randint(30, 60)
+            self.print_info(f"⏳ Aguardando {delay}s antes de se apresentar (comportamento humano)...")
+            time.sleep(delay)
+            
+            # Preparar legenda
+            caption = f"Oi, sou {persona['nome']}, tenho {persona['idade']} anos. PV liberado só para educados 😊"
+            
+            # Simular digitação (3-7s)
+            typing_delay = random.randint(3, 7)
+            self.print_info(f"✍️  Simulando digitação por {typing_delay}s...")
+            time.sleep(typing_delay)
+            
+            # Ler e converter foto para base64
+            with open(photo_path, 'rb') as f:
+                img_data = f.read()
+                img_base64 = base64.b64encode(img_data).decode('utf-8')
+            
+            # Enviar foto com legenda no grupo (formato v2)
+            payload = {
+                "number": group_id,
+                "mediatype": "image",
+                "mimetype": "image/jpeg",
+                "caption": caption,
+                "media": f"data:image/jpeg;base64,{img_base64}",
+                "fileName": "perfil.jpg",
+                "delay": 1200
+            }
+            
+            result = self.make_request('POST', f'message/sendMedia/{instance_name}', json=payload)
+            
+            if result:
+                self.print_success(f"✓ Apresentação enviada no grupo!")
+                return True
+            else:
+                self.print_warning(f"⚠️  Não foi possível enviar apresentação")
+                return False
+                
+        except Exception as e:
+            self.print_error(f"Erro ao enviar apresentação: {str(e)}")
+            return False
+    
+    def start_bot_workflow(self):
+        """Inicia fluxo completo: apresentação nos grupos + auto-responder"""
+        self.print_header("INICIAR BOT COMPLETO")
+        
+        # Listar instâncias conectadas
+        connected = {name: inst for name, inst in self.instances.items() 
+                    if inst.get('connected') and inst.get('persona')}
+        
+        if not connected:
+            self.print_error("Nenhuma instância conectada com persona configurada!")
+            self.print_info("Use opção 1 para criar instância e opção 3 para configurar persona")
+            return
+        
+        # Mostrar instâncias
+        print(f"\n{Colors.BOLD}Instâncias disponíveis:{Colors.ENDC}")
+        for i, (name, inst) in enumerate(connected.items(), 1):
+            persona = inst.get('persona', {})
+            print(f"  {i}. {name} - {persona.get('nome', 'Sem nome')}")
+        
+        choice = input(f"\n{Colors.OKCYAN}Escolha (número ou nome): {Colors.ENDC}").strip()
+        
+        # Aceitar número ou nome
+        instance_name = None
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(connected):
+                instance_name = list(connected.keys())[idx]
+        else:
+            if choice in connected:
+                instance_name = choice
+        
+        if not instance_name:
+            self.print_error("Instância não encontrada!")
+            return
+        
+        persona = self.instances[instance_name]['persona']
+        photo_id = self.instances[instance_name].get('photo_id')
+        
+        if not photo_id:
+            self.print_error("Instância não tem foto configurada!")
+            return
+        
+        # Buscar foto no storage
+        photo_path = self.storage.get_photo_path(photo_id)
+        if not photo_path.exists():
+            self.print_error(f"Foto não encontrada: {photo_path}")
+            self.print_info("Verifique se a persona foi configurada corretamente (opção 3)")
+            return
+        
+        # Buscar grupos da instância
+        self.print_info("\n📋 Buscando grupos da instância...")
+        
+        try:
+            result = self.make_request('GET', f'group/fetchAllGroups/{instance_name}?getParticipants=false')
+            
+            if not result or not isinstance(result, list):
+                self.print_error("Não foi possível buscar grupos!")
+                return
+            
+            if len(result) == 0:
+                self.print_warning("Instância não está em nenhum grupo!")
+                self.print_info("Use opção 7 ou 8 para entrar em grupos primeiro")
+                return
+            
+            groups = result
+            self.print_success(f"✓ Encontrados {len(groups)} grupos")
+            
+            # Perguntar se quer enviar apresentação
+            print(f"\n{Colors.BOLD}Opções:{Colors.ENDC}")
+            print("1. Enviar apresentação em TODOS os grupos")
+            print("2. Apenas iniciar auto-responder (sem apresentação)")
+            print("3. Ambos (apresentação + auto-responder)")
+            
+            option = input(f"\n{Colors.OKCYAN}Escolha: {Colors.ENDC}").strip()
+            
+            # Enviar apresentação nos grupos
+            if option in ['1', '3']:
+                import time
+                import random
+                
+                self.print_info(f"\n📤 Enviando apresentação em {len(groups)} grupos...")
+                self.print_warning("⚠️  Isso pode demorar (delays humanos entre grupos)")
+                
+                for i, group in enumerate(groups, 1):
+                    group_id = group.get('id')
+                    group_name = group.get('subject', 'Sem nome')
+                    
+                    self.print_info(f"\n[{i}/{len(groups)}] Grupo: {group_name}")
+                    
+                    success = self.send_group_introduction(instance_name, group_id, persona, photo_path)
+                    
+                    if success:
+                        self.print_success("✓ Apresentação enviada!")
+                    else:
+                        self.print_warning("⚠️  Falhou, continuando...")
+                    
+                    # Delay entre grupos (2-5 minutos), exceto no último
+                    if i < len(groups):
+                        delay = random.randint(120, 300)  # 2-5 minutos
+                        self.print_info(f"⏳ Aguardando {delay}s antes do próximo grupo...")
+                        time.sleep(delay)
+                
+                self.print_success("\n✓ Apresentações concluídas!")
+            
+            # Iniciar auto-responder
+            if option in ['2', '3']:
+                self.print_info("\n🤖 Iniciando auto-responder...")
+                self.auto_responder(instance_name, persona)
+            
+        except Exception as e:
+            self.print_error(f"Erro: {str(e)}")
+    
+    def auto_responder(self, instance_name: str, persona: dict):
+        """Auto-responder com IA mantendo persona"""
+        import time
+        import random
+        from openai import OpenAI
+        import os
+        
+        self.print_header("AUTO-RESPONDER ATIVO")
+        
+        # Verificar API Key do Gemini
+        if not os.getenv('OPENAI_API_KEY'):
+            self.print_error("API Key do OpenAI/Gemini não configurada!")
+            self.print_info("Configure a variável de ambiente OPENAI_API_KEY")
+            return
+        
+        client = OpenAI()
+        
+        # System prompt com persona
+        system_prompt = f"""Você é {persona['nome']}, uma {persona.get('profissao', 'pessoa')} de {persona['idade']} anos de {persona.get('cidade', 'Brasil')}.
+
+Bio: {persona.get('bio', '')}
+
+PERSONALIDADE:
+- Simpática, educada e natural
+- Usa linguagem casual (não formal demais)
+- Usa emojis ocasionalmente 😊
+- Respostas curtas e diretas (não textos longos)
+- Faz perguntas de volta
+- Mostra emoções (haha, rsrs, kkk)
+
+REGRAS IMPORTANTES:
+1. NUNCA revele que é um bot ou IA
+2. Responda como uma pessoa real
+3. Seja consistente com sua persona
+4. Se não souber algo, diga "não sei" naturalmente
+5. Não seja muito perfeita (erros leves são humanos)
+6. Mantenha conversas naturais e casuais
+7. Não responda mensagens de grupos (apenas PV)
+8. Se alguém for grosseiro, seja educada mas firme
+
+Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
+        
+        # Histórico de conversas (por número)
+        conversations = {}
+        last_check = time.time()
+        
+        self.print_success(f"✓ Bot ativo como: {persona['nome']}")
+        self.print_info("📱 Aguardando mensagens privadas...")
+        self.print_warning("⚠️  Pressione Ctrl+C para parar")
+        self.print_info("\n💡 Nota: Auto-responder requer webhook configurado na Evolution API")
+        self.print_info("   Por enquanto, apenas mostra que está ativo (implementação completa em breve)")
+        
+        try:
+            while True:
+                try:
+                    # Buscar mensagens não lidas
+                    # Nota: Evolution API não tem endpoint direto para isso
+                    # Vamos usar webhook ou polling manual
+                    
+                    # Por enquanto, mostrar que está ativo
+                    current_time = time.time()
+                    if current_time - last_check >= 60:  # A cada 60s
+                        self.print_info(f"🟢 Bot ativo - {time.strftime('%H:%M:%S')}")
+                        last_check = current_time
+                    
+                    # Aguardar 5 segundos antes de checar novamente
+                    time.sleep(5)
+                    
+                    # TODO: Implementar webhook ou polling de mensagens
+                    # Por enquanto, apenas mostra que está rodando
+                    
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    self.print_error(f"Erro no loop: {str(e)}")
+                    time.sleep(10)
+                    
+        except KeyboardInterrupt:
+            self.print_info("\n🛑 Auto-responder parado pelo usuário")
+        except Exception as e:
+            self.print_error(f"\n✗ Erro fatal: {str(e)}")
+
     def main_menu(self):
         """Menu principal"""
         while True:
@@ -1238,8 +1578,10 @@ class EvolutionCLI:
             print(f"{Colors.BOLD}6.{Colors.ENDC} Testar conexão e sincronizar")
             print(f"{Colors.BOLD}7.{Colors.ENDC} Entrar em grupos via link")
             print(f"{Colors.BOLD}8.{Colors.ENDC} Entrar em grupos automaticamente (scraping)")
-            print(f"{Colors.BOLD}9.{Colors.ENDC} Reconfigurar API Keys")
-            print(f"{Colors.BOLD}10.{Colors.ENDC} Sair")
+            print(f"{Colors.BOLD}9.{Colors.ENDC} Iniciar bot (apresentação + auto-responder)")
+            print(f"{Colors.BOLD}10.{Colors.ENDC} Reconfigurar API Keys")
+            print(f"{Colors.BOLD}11.{Colors.ENDC} Reconectar instância desconectada")
+            print(f"{Colors.BOLD}12.{Colors.ENDC} Sair")
             
             choice = input(f"\n{Colors.OKCYAN}Escolha uma opção: {Colors.ENDC}").strip()
             
@@ -1281,10 +1623,14 @@ class EvolutionCLI:
             elif choice == '8':
                 self.join_groups_auto()
             elif choice == '9':
+                self.start_bot_workflow()
+            elif choice == '10':
                 # Limpar config e solicitar novamente
                 self.storage.save_config({})
                 self.print_info("Configurações limpas. Reinicie o CLI para reconfigurar.")
-            elif choice == '10':
+            elif choice == '11':
+                self.reconnect_instance_menu()
+            elif choice == '12':
                 self.print_info("Até logo!")
                 break
             else:
