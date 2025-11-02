@@ -1,0 +1,80 @@
+
+services:
+  postgres:
+    container_name: evolution_postgres
+    image: postgres:16
+    restart: always
+    environment:
+      POSTGRES_USER: evolution
+      POSTGRES_PASSWORD: evolution_pass_2024
+      POSTGRES_DB: evolution_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - evolution_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    container_name: evolution_redis
+    image: redis:alpine
+    restart: always
+    networks:
+      - evolution_network
+
+  evolution-api:
+    container_name: evolution_api
+    image: evoapicloud/evolution-api:v2.3.6
+    restart: always
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      # Authentication
+      - AUTHENTICATION_API_KEY=manus-api-key-2024
+      
+      # Server
+      - SERVER_TYPE=http
+      - SERVER_PORT=8080
+      
+      # Database
+      - DATABASE_ENABLED=true
+      - DATABASE_CONNECTION_TYPE=postgres
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgres://evolution:evolution_pass_2024@postgres:5432/evolution_db
+      - DATABASE_SSL_CERT=false
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=true
+      - DATABASE_SAVE_DATA_CONTACTS=true
+      - DATABASE_SAVE_DATA_CHATS=true
+      
+      # Redis
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379/1
+      
+      # Logs
+      - LOG_LEVEL=ERROR,WARN,INFO
+      - LOG_COLOR=true
+      
+      # Instance
+      - CONFIG_SESSION_PHONE_CLIENT=Evolution API
+      - CONFIG_SESSION_PHONE_NAME=Chrome
+    volumes:
+      - evolution_instances:/evolution/instances
+    networks:
+      - evolution_network
+
+volumes:
+  postgres_data:
+  evolution_instances:
+
+networks:
+  evolution_network:
+    driver: bridge
