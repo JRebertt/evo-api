@@ -2,12 +2,12 @@
   "keys": [
     {
       "name": "Key 1",
-      "key": "AIzaSyCdG2_41Jq4X6saXpfeCPpZwWt7G7kkst4",
-      "exhausted": true,
-      "exhausted_at": "2025-11-02T23:24:11.308503",
-      "total_uses": 6
+      "key": "AIzaSyC6tWeiw51yeohAcsoEMqSiN34YIbw-Me4",
+      "exhausted": false,
+      "exhausted_at": null,
+      "total_uses": 0
     }
   ],
   "current_index": 0,
-  "last_reset": "2025-11-02"
+  "last_reset": "2025-11-03"
 }

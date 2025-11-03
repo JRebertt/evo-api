@@ -27,101 +27,6 @@ class Colors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
-class APIKeyManager:
-    """Gerenciador de múltiplas API Keys com rotação automática"""
-    
-    def __init__(self, storage_dir: Path):
-        self.storage_dir = storage_dir
-        self.keys_file = storage_dir / 'api_keys.json'
-        self.keys_data = self.load_keys()
-    
-    def load_keys(self) -> Dict:
-        """Carrega configuração das API Keys"""
-        if self.keys_file.exists():
-            with open(self.keys_file, 'r') as f:
-                return json.load(f)
-        
-        # Estrutura padrão
-        return {
-            "keys": [],
-            "current_index": 0,
-            "last_reset": None
-        }
-    
-    def save_keys(self):
-        """Salva configuração das API Keys"""
-        with open(self.keys_file, 'w') as f:
-            json.dump(self.keys_data, f, indent=2)
-    
-    def add_key(self, api_key: str, name: str = None):
-        """Adiciona nova API Key"""
-        if not name:
-            name = f"Key {len(self.keys_data['keys']) + 1}"
-        
-        key_info = {
-            "name": name,
-            "key": api_key,
-            "exhausted": False,
-            "exhausted_at": None,
-            "total_uses": 0
-        }
-        
-        self.keys_data['keys'].append(key_info)
-        self.save_keys()
-    
-    def get_available_key(self) -> Optional[tuple]:
-        """Retorna próxima key disponível (index, key_info)"""
-        import datetime
-        
-        # Verificar se precisa resetar (novo dia UTC)
-        self.check_and_reset_daily()
-        
-        # Procurar key disponível
-        for i, key_info in enumerate(self.keys_data['keys']):
-            if not key_info['exhausted']:
-                return (i, key_info)
-        
-        return None
-    
-    def mark_key_exhausted(self, index: int):
-        """Marca key como esgotada"""
-        import datetime
-        
-        if 0 <= index < len(self.keys_data['keys']):
-            self.keys_data['keys'][index]['exhausted'] = True
-            self.keys_data['keys'][index]['exhausted_at'] = datetime.datetime.utcnow().isoformat()
-            self.save_keys()
-    
-    def check_and_reset_daily(self):
-        """Reseta status das keys se for novo dia (UTC)"""
-        import datetime
-        
-        now = datetime.datetime.utcnow()
-        today = now.date().isoformat()
-        
-        last_reset = self.keys_data.get('last_reset')
-        
-        # Se é novo dia ou nunca resetou, resetar todas
-        if last_reset != today:
-            for key_info in self.keys_data['keys']:
-                key_info['exhausted'] = False
-                key_info['exhausted_at'] = None
-            
-            self.keys_data['last_reset'] = today
-            self.save_keys()
-    
-    def get_stats(self) -> Dict:
-        """Retorna estatísticas das keys"""
-        total = len(self.keys_data['keys'])
-        exhausted = sum(1 for k in self.keys_data['keys'] if k['exhausted'])
-        available = total - exhausted
-        
-        return {
-            "total": total,
-            "available": available,
-            "exhausted": exhausted
-        }
-
 class Storage:
     """Gerenciador de storage local"""
     
@@ -173,9 +78,6 @@ class EvolutionCLI:
     def __init__(self):
         self.base_dir = Path(__file__).parent
         self.storage = Storage(self.base_dir)
-        
-        # Inicializar gerenciador de API Keys
-        self.api_key_manager = APIKeyManager(self.storage.storage_dir)
         
         # Detectar IP local
         self.local_ip = self.get_local_ip()
@@ -1572,7 +1474,7 @@ Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
                 if len(conversations[remote_jid]) > 20:
                     conversations[remote_jid] = conversations[remote_jid][-20:]
                 
-                # Gerar resposta com IA (com rotação de API Keys)
+                # Gerar resposta com IA (com retry e fallback)
                 print(f"{Colors.WARNING}🤖 Gerando resposta...{Colors.ENDC}")
                 
                 messages = [
@@ -1580,26 +1482,11 @@ Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
                 ] + conversations[remote_jid]
                 
                 reply_text = None
+                max_retries = 3
                 
-                # Tentar com cada API Key disponível
-                while True:
-                    key_result = self.api_key_manager.get_available_key()
-                    
-                    if not key_result:
-                        # Nenhuma key disponível
-                        stats = self.api_key_manager.get_stats()
-                        print(f"{Colors.FAIL}❌ Todas as {stats['total']} API Keys esgotadas!{Colors.ENDC}")
-                        break
-                    
-                    key_index, key_info = key_result
-                    print(f"{Colors.OKCYAN}🔑 Usando {key_info['name']} ({key_index + 1}/{self.api_key_manager.get_stats()['total']}){Colors.ENDC}")
-                    
+                for attempt in range(max_retries):
                     try:
-                        # Criar cliente com a key específica
-                        import os
-                        temp_client = OpenAI(api_key=key_info['key'])
-                        
-                        response = temp_client.chat.completions.create(
+                        response = client.chat.completions.create(
                             model="gemini-2.5-flash",
                             messages=messages,
                             max_tokens=150,
@@ -1609,39 +1496,34 @@ Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
                         # Verificar se content não é None
                         if response.choices[0].message.content:
                             reply_text = response.choices[0].message.content.strip()
-                            
-                            # Incrementar contador de uso
-                            self.api_key_manager.keys_data['keys'][key_index]['total_uses'] += 1
-                            self.api_key_manager.save_keys()
-                            
-                            print(f"{Colors.OKGREEN}✓ Resposta gerada com sucesso!{Colors.ENDC}")
-                            break  # Sucesso!
+                            break  # Sucesso, sair do loop
                         else:
-                            print(f"{Colors.WARNING}⚠️  IA retornou conteúdo vazio, tentando próxima key...{Colors.ENDC}")
-                            # Não marcar como esgotada, apenas tentar próxima
-                            continue
+                            print(f"{Colors.WARNING}⚠️  IA retornou conteúdo vazio, tentando novamente...{Colors.ENDC}")
+                            time.sleep(2)  # Aguardar antes de tentar novamente
                             
                     except Exception as e:
                         error_msg = str(e)
                         
                         # Erro 429: Quota excedida
                         if "429" in error_msg or "quota" in error_msg.lower():
-                            print(f"{Colors.WARNING}⚠️  {key_info['name']} esgotada! Marcando até meia-noite UTC...{Colors.ENDC}")
-                            self.api_key_manager.mark_key_exhausted(key_index)
+                            print(f"{Colors.WARNING}⚠️  Quota excedida! Tentativa {attempt + 1}/{max_retries}{Colors.ENDC}")
                             
-                            # Tentar próxima key
-                            stats = self.api_key_manager.get_stats()
-                            if stats['available'] > 0:
-                                print(f"{Colors.OKCYAN}🔄 Tentando próxima key ({stats['available']} disponíveis)...{Colors.ENDC}")
-                                continue
+                            # Extrair tempo de retry se disponível
+                            if "retry" in error_msg.lower():
+                                import re
+                                match = re.search(r'(\d+\.?\d*)s', error_msg)
+                                if match:
+                                    retry_delay = float(match.group(1))
+                                    print(f"{Colors.WARNING}⏳ Aguardando {retry_delay:.1f}s antes de tentar novamente...{Colors.ENDC}")
+                                    time.sleep(retry_delay)
+                                else:
+                                    time.sleep(5)  # Delay padrão
                             else:
-                                print(f"{Colors.FAIL}❌ Todas as keys esgotadas!{Colors.ENDC}")
-                                break
+                                time.sleep(5)
                         else:
-                            # Outro erro (não marcar key como esgotada)
+                            # Outro erro
                             print(f"{Colors.WARNING}⚠️  Erro na IA: {error_msg[:100]}...{Colors.ENDC}")
-                            print(f"{Colors.WARNING}🔄 Tentando próxima key...{Colors.ENDC}")
-                            continue
+                            time.sleep(2)
                 
                 # Se todas as tentativas falharam, usar mensagem de fallback
                 if not reply_text:
@@ -1904,84 +1786,6 @@ Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
         self.print_info("🚀 Iniciando servidor webhook...")
         self.start_webhook_server(instance_name, persona, webhook_port)
 
-    def manage_api_keys(self):
-        """Menu para gerenciar API Keys do Gemini"""
-        self.print_header("GERENCIAR API KEYS (GEMINI)")
-        
-        stats = self.api_key_manager.get_stats()
-        
-        print(f"\n{Colors.BOLD}Status Atual:{Colors.ENDC}")
-        print(f"  Total de keys: {stats['total']}")
-        print(f"  Disponíveis: {Colors.OKGREEN}{stats['available']}{Colors.ENDC}")
-        print(f"  Esgotadas: {Colors.WARNING}{stats['exhausted']}{Colors.ENDC}")
-        
-        if stats['total'] > 0:
-            print(f"\n{Colors.BOLD}Keys Cadastradas:{Colors.ENDC}")
-            for i, key_info in enumerate(self.api_key_manager.keys_data['keys'], 1):
-                status = f"{Colors.OKGREEN}✓ Disponível{Colors.ENDC}" if not key_info['exhausted'] else f"{Colors.WARNING}❌ Esgotada{Colors.ENDC}"
-                uses = key_info.get('total_uses', 0)
-                print(f"  {i}. {key_info['name']}: {status} (Usos: {uses})")
-        
-        print(f"\n{Colors.BOLD}Opções:{Colors.ENDC}")
-        print("1. Adicionar nova API Key")
-        print("2. Remover API Key")
-        print("3. Resetar status (forçar reset diário)")
-        print("4. Voltar")
-        
-        choice = input(f"\n{Colors.OKCYAN}Escolha: {Colors.ENDC}").strip()
-        
-        if choice == '1':
-            # Adicionar key
-            print(f"\n{Colors.BOLD}Adicionar Nova API Key{Colors.ENDC}")
-            api_key = input(f"{Colors.OKCYAN}Cole a API Key do Gemini: {Colors.ENDC}").strip()
-            
-            if not api_key:
-                self.print_error("API Key não pode ser vazia!")
-                return
-            
-            name = input(f"{Colors.OKCYAN}Nome da key (Enter para auto): {Colors.ENDC}").strip()
-            
-            self.api_key_manager.add_key(api_key, name if name else None)
-            self.print_success(f"✓ API Key adicionada com sucesso!")
-            
-            stats = self.api_key_manager.get_stats()
-            self.print_info(f"Total de keys: {stats['total']}")
-            
-        elif choice == '2':
-            # Remover key
-            if stats['total'] == 0:
-                self.print_error("Nenhuma key cadastrada!")
-                return
-            
-            print(f"\n{Colors.BOLD}Remover API Key{Colors.ENDC}")
-            for i, key_info in enumerate(self.api_key_manager.keys_data['keys'], 1):
-                print(f"  {i}. {key_info['name']}")
-            
-            idx = input(f"\n{Colors.OKCYAN}Número da key para remover: {Colors.ENDC}").strip()
-            
-            try:
-                idx = int(idx) - 1
-                if 0 <= idx < len(self.api_key_manager.keys_data['keys']):
-                    removed = self.api_key_manager.keys_data['keys'].pop(idx)
-                    self.api_key_manager.save_keys()
-                    self.print_success(f"✓ Key '{removed['name']}' removida!")
-                else:
-                    self.print_error("Número inválido!")
-            except ValueError:
-                self.print_error("Digite um número válido!")
-                
-        elif choice == '3':
-            # Resetar status
-            import datetime
-            self.api_key_manager.keys_data['last_reset'] = None
-            self.api_key_manager.check_and_reset_daily()
-            self.print_success("✓ Status resetado! Todas as keys estão disponíveis novamente.")
-            
-        elif choice == '4':
-            return
-        else:
-            self.print_error("Opção inválida!")
-    
     def main_menu(self):
         """Menu principal"""
         while True:
@@ -1998,8 +1802,7 @@ Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
             print(f"{Colors.BOLD}9.{Colors.ENDC} Iniciar bot (apresentação + auto-responder)")
             print(f"{Colors.BOLD}10.{Colors.ENDC} Reconfigurar API Keys")
             print(f"{Colors.BOLD}11.{Colors.ENDC} Reconectar instância desconectada")
-            print(f"{Colors.BOLD}12.{Colors.ENDC} Gerenciar API Keys (Gemini)")
-            print(f"{Colors.BOLD}13.{Colors.ENDC} Sair")
+            print(f"{Colors.BOLD}12.{Colors.ENDC} Sair")
             
             choice = input(f"\n{Colors.OKCYAN}Escolha uma opção: {Colors.ENDC}").strip()
             
@@ -2049,8 +1852,6 @@ Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
             elif choice == '11':
                 self.reconnect_instance_menu()
             elif choice == '12':
-                self.manage_api_keys()
-            elif choice == '13':
                 self.print_info("Até logo!")
                 break
             else:
