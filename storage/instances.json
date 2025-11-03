@@ -53,5 +53,13 @@
     },
     "photo_id": "cd46be8c",
     "is_business": false
+  },
+  "whats-bn": {
+    "name": "whats-bn",
+    "apikey": "334CBF3C-B1B8-454B-89C8-85AD19558E5D",
+    "created_at": 1762130166.058787,
+    "connected": true,
+    "persona": null,
+    "photo_id": null
   }
 }

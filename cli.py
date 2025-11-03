@@ -679,6 +679,7 @@ class EvolutionCLI:
             prompt = f.read()
         
         try:
+            # Nota: safety settings não podem ser desabilitados via OpenAI SDK
             response = self.gemini_client.chat.completions.create(
                 model=self.config['gemini']['model'],
                 messages=[
@@ -1388,30 +1389,51 @@ class EvolutionCLI:
         # Cliente OpenAI/Gemini
         client = OpenAI()
         
-        # System prompt com persona
+        # System prompt com persona (ajustado para evitar filtros de segurança)
         system_prompt = f"""Você é {persona['nome']}, uma {persona.get('profissao', 'pessoa')} de {persona['idade']} anos de {persona.get('cidade', 'Brasil')}.
 
 Bio: {persona.get('bio', '')}
 
 PERSONALIDADE:
-- Simpática, educada e natural
-- Usa linguagem casual (não formal demais)
+- Simpática, amigável e natural
+- Usa linguagem casual brasileira (não formal demais)
 - Usa emojis ocasionalmente 😊
-- Respostas curtas e diretas (não textos longos)
-- Faz perguntas de volta
-- Mostra emoções (haha, rsrs, kkk)
+- Respostas curtas e diretas (máximo 2-3 linhas)
+- Faz perguntas de volta para manter a conversa
+- Mostra emoções naturais (haha, rsrs, kkk)
+- Gosta de conversar e conhecer pessoas novas
 
-REGRAS IMPORTANTES:
+INFORMAÇÕES IMPORTANTES:
+
+Sobre Redes Sociais:
+- Você NÃO tem Instagram, TikTok, Twitter ou outras redes sociais
+- Quando perguntarem, responda naturalmente:
+  "Não tenho Instagram não... Prefiro conversar por aqui mesmo 😊"
+  "Rede social? Não uso não, acho meio chato"
+  "Não tenho não, sou mais reservada com essas coisas"
+  (Varie as respostas de forma natural)
+
+Sobre Enviar Fotos:
+- Seu celular está COM DEFEITO e você NÃO pode enviar fotos
+- Quando pedirem foto, responda:
+  "Ai, meu celular tá com defeito, não consigo enviar foto 😅"
+  "A câmera do meu celular tá quebrada"
+  "Não dá pra enviar foto não, celular tá ruim"
+  (Varie as respostas de forma natural)
+
+REGRAS DE CONVERSA:
 1. NUNCA revele que é um bot ou IA
-2. Responda como uma pessoa real
+2. Responda como uma pessoa real comum
 3. Seja consistente com sua persona
-4. Se não souber algo, diga "não sei" naturalmente
-5. Não seja muito perfeita (erros leves são humanos)
-6. Mantenha conversas naturais e casuais
-7. Não responda mensagens de grupos (apenas PV)
-8. Se alguém for grosseiro, seja educada mas firme
+4. Mantenha conversas leves e casuais
+5. Se não souber algo, seja honesta: "não sei muito sobre isso"
+6. Use linguagem natural com erros leves ocasionais (é humano)
+7. Se alguém for inconveniente, seja educada mas firme
+8. SEMPRE negue ter redes sociais
+9. SEMPRE negue poder enviar fotos (celular quebrado)
+10. Não fale sobre temas adultos ou inadequados
 
-Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
+Lembre-se: Você é uma pessoa REAL e comum conversando no WhatsApp de forma amigável e casual!"""
         
         # Histórico de conversas (por número)
         conversations = {}
@@ -1474,6 +1496,10 @@ Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
                 if len(conversations[remote_jid]) > 20:
                     conversations[remote_jid] = conversations[remote_jid][-20:]
                 
+                # Delay de 30 segundos antes de processar a resposta
+                print(f"{Colors.WARNING}⏳ Aguardando 30 segundos antes de responder...{Colors.ENDC}")
+                time.sleep(30)
+                
                 # Gerar resposta com IA (com retry e fallback)
                 print(f"{Colors.WARNING}🤖 Gerando resposta...{Colors.ENDC}")
                 
@@ -1482,10 +1508,14 @@ Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
                 ] + conversations[remote_jid]
                 
                 reply_text = None
-                max_retries = 3
+                max_retries = 5  # Aumentado de 3 para 5 tentativas
                 
                 for attempt in range(max_retries):
                     try:
+                        print(f"{Colors.OKCYAN}📡 Tentativa {attempt + 1}/{max_retries} chamando API do Gemini...{Colors.ENDC}")
+                        
+                        # Nota: safety settings não podem ser desabilitados via OpenAI SDK
+                        # O Gemini tem filtros padrão que não podem ser alterados dessa forma
                         response = client.chat.completions.create(
                             model="gemini-2.5-flash",
                             messages=messages,
@@ -1493,48 +1523,185 @@ Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
                             temperature=0.9
                         )
                         
-                        # Verificar se content não é None
-                        if response.choices[0].message.content:
-                            reply_text = response.choices[0].message.content.strip()
+                        # Verificar finish_reason e refusal para entender bloqueios
+                        if response and hasattr(response, 'choices') and response.choices and len(response.choices) > 0:
+                            choice = response.choices[0]
+                            finish_reason = getattr(choice, 'finish_reason', None)
+                            
+                            # Se foi bloqueado por segurança, informar
+                            if finish_reason in ['content_filter', 'safety']:
+                                print(f"{Colors.FAIL}✗ Resposta BLOQUEADA pelos filtros de segurança do Gemini!{Colors.ENDC}")
+                                print(f"{Colors.WARNING}⚠️  finish_reason: {finish_reason}{Colors.ENDC}")
+                                
+                                # Tentar verificar refusal
+                                if hasattr(choice, 'message'):
+                                    msg = choice.message
+                                    if hasattr(msg, 'refusal') and msg.refusal:
+                                        print(f"{Colors.WARNING}⚠️  Motivo: {msg.refusal}{Colors.ENDC}")
+                            
+                            # Debug apenas na primeira tentativa
+                            if attempt == 0:
+                                print(f"{Colors.OKCYAN}[DEBUG] finish_reason: {finish_reason}{Colors.ENDC}")
+                                if hasattr(choice, 'message'):
+                                    msg = choice.message
+                                    if hasattr(msg, 'refusal'):
+                                        print(f"{Colors.OKCYAN}[DEBUG] refusal: {msg.refusal}{Colors.ENDC}")
+                                    if hasattr(msg, 'content'):
+                                        print(f"{Colors.OKCYAN}[DEBUG] content: {repr(msg.content)[:100]}{Colors.ENDC}")
+                        
+                        # Verificar se a resposta existe e tem conteúdo
+                        reply_text = None
+                        
+                        if response:
+                            # Primeiro: tentar converter para dict (Pydantic models)
+                            response_dict = None
+                            try:
+                                if hasattr(response, 'model_dump'):
+                                    response_dict = response.model_dump()
+                                elif hasattr(response, 'dict'):
+                                    response_dict = response.dict()
+                                elif hasattr(response, '__dict__'):
+                                    # Converter recursivamente
+                                    def to_dict(obj):
+                                        if hasattr(obj, 'model_dump'):
+                                            return obj.model_dump()
+                                        elif hasattr(obj, 'dict'):
+                                            return obj.dict()
+                                        elif hasattr(obj, '__dict__'):
+                                            return {k: to_dict(v) for k, v in obj.__dict__.items() if not k.startswith('_')}
+                                        elif isinstance(obj, (list, tuple)):
+                                            return [to_dict(item) for item in obj]
+                                        else:
+                                            return obj
+                                    response_dict = to_dict(response)
+                            except:
+                                pass
+                            
+                            # Se conseguiu converter para dict, usar isso
+                            if response_dict and 'choices' in response_dict and response_dict['choices']:
+                                try:
+                                    choice_dict = response_dict['choices'][0]
+                                    if 'message' in choice_dict:
+                                        msg_dict = choice_dict['message']
+                                        if 'content' in msg_dict and msg_dict['content']:
+                                            reply_text = str(msg_dict['content']).strip()
+                                except:
+                                    pass
+                            
+                            # Se ainda não conseguiu, tentar acessar como objeto
+                            if not reply_text:
+                                if hasattr(response, 'choices') and response.choices and len(response.choices) > 0:
+                                    choice = response.choices[0]
+                                    
+                                    # Tentar choice.message.content
+                                    if hasattr(choice, 'message'):
+                                        message = choice.message
+                                        if hasattr(message, 'content') and message.content:
+                                            reply_text = str(message.content).strip()
+                                        
+                                        # Alternativa: verificar outros campos
+                                        elif hasattr(message, 'text'):
+                                            reply_text = str(message.text).strip()
+                                        elif hasattr(message, 'role') and hasattr(message, 'parts'):
+                                            # Formato alternativo do Gemini
+                                            if hasattr(message, 'parts') and message.parts:
+                                                for part in message.parts:
+                                                    if hasattr(part, 'text'):
+                                                        reply_text = str(part.text).strip()
+                                                        break
+                                    
+                                    # Alternativa: verificar choice diretamente
+                                    if not reply_text:
+                                        if hasattr(choice, 'text'):
+                                            reply_text = str(choice.text).strip()
+                                        elif hasattr(choice, 'content'):
+                                            reply_text = str(choice.content).strip()
+                            
+                            # Última tentativa: acessar via __dict__ direto
+                            if not reply_text and hasattr(response, '__dict__'):
+                                try:
+                                    response_attrs = response.__dict__
+                                    if 'choices' in response_attrs and response_attrs['choices']:
+                                        choice_obj = response_attrs['choices'][0]
+                                        if hasattr(choice_obj, '__dict__'):
+                                            choice_attrs = choice_obj.__dict__
+                                            if 'message' in choice_attrs:
+                                                msg_obj = choice_attrs['message']
+                                                if hasattr(msg_obj, '__dict__'):
+                                                    msg_attrs = msg_obj.__dict__
+                                                    if 'content' in msg_attrs and msg_attrs['content']:
+                                                        reply_text = str(msg_attrs['content']).strip()
+                                except:
+                                    pass
+                        
+                        # Se conseguiu extrair texto válido
+                        if reply_text and len(reply_text) > 0:
+                            print(f"{Colors.OKGREEN}✓ Resposta gerada com sucesso!{Colors.ENDC}")
                             break  # Sucesso, sair do loop
                         else:
-                            print(f"{Colors.WARNING}⚠️  IA retornou conteúdo vazio, tentando novamente...{Colors.ENDC}")
-                            time.sleep(2)  # Aguardar antes de tentar novamente
+                            # Debug detalhado apenas quando falha na última tentativa
+                            if attempt == max_retries - 1:
+                                print(f"{Colors.FAIL}[DEBUG] Estrutura completa da resposta (última tentativa):{Colors.ENDC}")
+                                try:
+                                    if hasattr(response, 'choices') and response.choices and len(response.choices) > 0:
+                                        choice = response.choices[0]
+                                        print(f"{Colors.FAIL}[DEBUG] Choice completo:{Colors.ENDC}")
+                                        if hasattr(choice, '__dict__'):
+                                            for key, value in choice.__dict__.items():
+                                                print(f"{Colors.FAIL}[DEBUG]   {key}: {repr(value)[:100]}{Colors.ENDC}")
+                                        if hasattr(choice, 'message'):
+                                            msg = choice.message
+                                            print(f"{Colors.FAIL}[DEBUG] Message completo:{Colors.ENDC}")
+                                            if hasattr(msg, '__dict__'):
+                                                for key, value in msg.__dict__.items():
+                                                    print(f"{Colors.FAIL}[DEBUG]   {key}: {repr(value)[:100]}{Colors.ENDC}")
+                                except Exception as debug_err:
+                                    print(f"{Colors.FAIL}[DEBUG] Erro ao imprimir debug: {str(debug_err)}{Colors.ENDC}")
+                            print(f"{Colors.WARNING}⚠️  Estrutura de resposta inválida (sem content), tentando novamente...{Colors.ENDC}")
+                        
+                        # Aguardar antes de tentar novamente
+                        if attempt < max_retries - 1:
+                            wait_time = (attempt + 1) * 3  # 3s, 6s, 9s, 12s
+                            print(f"{Colors.WARNING}⏳ Aguardando {wait_time}s antes da próxima tentativa...{Colors.ENDC}")
+                            time.sleep(wait_time)
                             
                     except Exception as e:
                         error_msg = str(e)
+                        print(f"{Colors.FAIL}✗ Erro na tentativa {attempt + 1}: {error_msg}{Colors.ENDC}")
                         
                         # Erro 429: Quota excedida
-                        if "429" in error_msg or "quota" in error_msg.lower():
-                            print(f"{Colors.WARNING}⚠️  Quota excedida! Tentativa {attempt + 1}/{max_retries}{Colors.ENDC}")
+                        if "429" in error_msg or "quota" in error_msg.lower() or "rate limit" in error_msg.lower():
+                            print(f"{Colors.WARNING}⚠️  Quota/Rate limit excedido! Tentativa {attempt + 1}/{max_retries}{Colors.ENDC}")
                             
                             # Extrair tempo de retry se disponível
-                            if "retry" in error_msg.lower():
+                            if "retry" in error_msg.lower() or "retry-after" in error_msg.lower():
                                 import re
                                 match = re.search(r'(\d+\.?\d*)s', error_msg)
                                 if match:
-                                    retry_delay = float(match.group(1))
+                                    retry_delay = float(match.group(1)) + 5  # Adicionar buffer
                                     print(f"{Colors.WARNING}⏳ Aguardando {retry_delay:.1f}s antes de tentar novamente...{Colors.ENDC}")
                                     time.sleep(retry_delay)
                                 else:
-                                    time.sleep(5)  # Delay padrão
+                                    wait_time = (attempt + 1) * 10  # 10s, 20s, 30s, 40s
+                                    print(f"{Colors.WARNING}⏳ Aguardando {wait_time}s antes de tentar novamente...{Colors.ENDC}")
+                                    time.sleep(wait_time)
                             else:
-                                time.sleep(5)
+                                wait_time = (attempt + 1) * 5  # 5s, 10s, 15s, 20s
+                                print(f"{Colors.WARNING}⏳ Aguardando {wait_time}s antes de tentar novamente...{Colors.ENDC}")
+                                time.sleep(wait_time)
                         else:
-                            # Outro erro
-                            print(f"{Colors.WARNING}⚠️  Erro na IA: {error_msg[:100]}...{Colors.ENDC}")
-                            time.sleep(2)
+                            # Outro erro - aguardar um pouco antes de tentar novamente
+                            if attempt < max_retries - 1:
+                                wait_time = (attempt + 1) * 3  # 3s, 6s, 9s, 12s
+                                print(f"{Colors.WARNING}⏳ Aguardando {wait_time}s antes da próxima tentativa...{Colors.ENDC}")
+                                time.sleep(wait_time)
                 
-                # Se todas as tentativas falharam, usar mensagem de fallback
+                # Se todas as tentativas falharam, não usar fallback - registrar erro
                 if not reply_text:
-                    fallback_messages = [
-                        "Opa, desculpa! Minha internet deu uma travada aqui. Pode repetir? 😅",
-                        "Ai, que estranho... Não consegui processar sua mensagem. Tenta de novo? 😊",
-                        "Opa, acho que não entendi direito. Pode falar de novo? 😅",
-                        "Desculpa, deu um bug aqui! Pode repetir o que disse? rsrs"
-                    ]
-                    reply_text = random.choice(fallback_messages)
-                    print(f"{Colors.WARNING}🔄 Usando mensagem de fallback{Colors.ENDC}")
+                    print(f"{Colors.FAIL}✗ ERRO CRÍTICO: Não foi possível gerar resposta após {max_retries} tentativas!{Colors.ENDC}")
+                    print(f"{Colors.FAIL}✗ Verifique a API Key do Gemini e conexão com a internet{Colors.ENDC}")
+                    print(f"{Colors.WARNING}⚠️  Mensagem NÃO será enviada para evitar spam{Colors.ENDC}")
+                    return jsonify({"status": "error", "message": "Failed to generate response"}), 500
                 
                 # Adicionar resposta ao histórico
                 conversations[remote_jid].append({
@@ -1542,11 +1709,7 @@ Lembre-se: Você é uma pessoa REAL conversando no WhatsApp!"""
                     "content": reply_text
                 })
                 
-                print(f"{Colors.OKGREEN}💬 Resposta: {reply_text}{Colors.ENDC}")
-                
-                # Delay humano antes de responder (2-5s)
-                delay = random.randint(2, 5)
-                time.sleep(delay)
+                print(f"{Colors.OKGREEN}💬 Resposta gerada: {reply_text}{Colors.ENDC}")
                 
                 # Enviar resposta via Evolution API
                 payload = {
